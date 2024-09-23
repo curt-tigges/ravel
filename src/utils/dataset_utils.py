@@ -95,6 +95,13 @@ def kept_first_n_label_token_multitask(x,
 def is_llama_tokenizer(tokenizer):
   return isinstance(tokenizer, LlamaTokenizerFast)
 
+def safe_numpy_to_tensor(x):
+    if isinstance(x, np.ndarray):
+        return torch.from_numpy(np.asarray(x))
+    return x
+
+def custom_collate(batch):
+    return {key: safe_numpy_to_tensor([d[key] for d in batch]) for key in batch[0]}
 
 def get_dataloader(eval_dataset,
                    tokenizer,
@@ -110,13 +117,19 @@ def get_dataloader(eval_dataset,
                                  x,
                                  extra_input_to_tokenize=['source_input'],
                                  extra_label_to_tokenize=['inv_label']))
+  # print first item in dataset
+  #print(f"after preproc: {eval_dataset[0]}")
   eval_dataset = eval_dataset.map(lambda x: kept_first_n_label_token(
       x, first_n, padding_offset=3 if is_llama_tokenizer(tokenizer) else 0))
+  #print(f"after kept_first_n_label_token: {eval_dataset[0]}")
   eval_dataset = eval_dataset.with_format("torch")
+  #print(f"after with_format: {eval_dataset[0]}")
   eval_dataloader = DataLoader(eval_dataset,
                                batch_size=batch_size,
                                drop_last=drop_last,
                                shuffle=True)
+  # get the first item from the dataloader
+  #print(f"first item in dataloader: {next(iter(eval_dataloader))}")
   return eval_dataloader
 
 
@@ -177,6 +190,8 @@ class HDF5Dataset(torch.utils.data.Dataset):
   def __len__(self):
     return len(self.index_to_keys)
 
+def sub_select_dictionary_by_key(dictionary: dict, keys: list):
+    return {key: dictionary[key] for key in keys}
 
 def load_entity_representation_with_label(feature_hdf5_path,
                                           entity_attr_to_label, splits):
@@ -204,3 +219,37 @@ def load_entity_representation_with_label(feature_hdf5_path,
                         ], np.int64) for split in labels
     }
   return X, Y, sorted_unique_label
+
+
+def load_selected_entity_representation_with_label(
+    feature_hdf5_path,
+    entity_attr_to_label, 
+    splits,
+    selected_attributes
+  ):
+    f = h5py.File(feature_hdf5_path, 'r')
+    attributes = list(entity_attr_to_label.values())[0].keys()
+    X, Y = {}, {}
+    for attr in attributes:
+      if attr not in selected_attributes:
+        continue
+      X[attr] = {
+          split: np.array(f['%s-%s' % (attr, split)][:], np.float32)
+          for split in splits
+      }
+      entities = {
+          split: pkl.loads(np.void(f['%s-%s_entity' % (attr, split)]))
+          for split in splits
+      }
+      labels = {
+          split: [entity_attr_to_label[e][attr] for e in entities[split]
+                  ] for split in splits
+      }
+      sorted_unique_label = sorted(
+          set([x for split in splits for x in labels[split]]))
+      print('#unique labels=%d' % len(sorted_unique_label), sorted_unique_label)
+      Y[attr] = {
+          split: np.array([sorted_unique_label.index(x) for x in labels[split]
+                          ], np.int64) for split in labels
+      }
+    return X, Y, sorted_unique_label
